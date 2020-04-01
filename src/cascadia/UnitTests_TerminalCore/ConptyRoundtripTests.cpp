@@ -177,6 +177,7 @@ class TerminalCoreUnitTests::ConptyRoundtripTests final
     TEST_METHOD(OutputWrappedLinesAtTopOfBuffer);
     TEST_METHOD(OutputWrappedLinesAtBottomOfBuffer);
     TEST_METHOD(ScrollWithChangesInMiddle);
+    TEST_METHOD(DontWrapMoveCursorInSingleFrame);
 
     TEST_METHOD(ScrollWithMargins);
 
@@ -1351,11 +1352,6 @@ void ConptyRoundtripTests::ScrollWithMargins()
     {
         const std::string expectedString(initialTermView.Width() - 1, '*');
         expectedOutput.push_back(expectedString);
-
-        // Cursor gets reset into bottom right corner as we're writing all the way into that corner.
-        // std::stringstream ss;
-        // ss << "\x1b[" << initialTermView.Height() << ";" << initialTermView.Width() << "H";
-        // expectedOutput.push_back(ss.str());
     }
 
     Log::Comment(L"Verify host buffer contains pattern.");
@@ -1511,4 +1507,55 @@ void ConptyRoundtripTests::ScrollWithMargins()
     Log::Comment(L"Verify terminal buffer contains pattern moved up one and mode line still in place.");
     // Verify the terminal side.
     verifyBufferAfter(termTb);
+}
+
+void ConptyRoundtripTests::DontWrapMoveCursorInSingleFrame()
+{
+    // See https://github.com/microsoft/terminal/pull/5181#issuecomment-607427840
+    Log::Comment(L"This is a test for when a line of text exactly wrapped, but "
+                 L"the cursor didn't end the frame at the end of line (waiting "
+                 L"for more wrapped text). We should still move the cursor in "
+                 L"this case.");
+    VERIFY_IS_NOT_NULL(_pVtRenderEngine.get());
+
+    auto& g = ServiceLocator::LocateGlobals();
+    auto& renderer = *g.pRender;
+    auto& gci = g.getConsoleInformation();
+    auto& si = gci.GetActiveOutputBuffer();
+    auto& hostSm = si.GetStateMachine();
+    auto& hostTb = si.GetTextBuffer();
+    auto& termTb = *term->_buffer;
+
+    _flushFirstFrame();
+
+    auto verifyBuffer = [](const TextBuffer& tb) {
+        // Simple verification: Make sure the cursor is in the correct place,
+        // and that it's visible. We don't care so much about the buffer
+        // contents in this test.
+        const COORD expectedCursor{ 8, 3 };
+        VERIFY_ARE_EQUAL(expectedCursor, tb.GetCursor().GetPosition());
+        VERIFY_IS_TRUE(tb.GetCursor().IsVisible());
+    };
+
+    hostSm.ProcessString(L"\x1b[?25l");
+    hostSm.ProcessString(L"\x1b[H");
+    hostSm.ProcessString(L"\x1b[75C");
+    hostSm.ProcessString(L"XXXXX");
+    hostSm.ProcessString(L"\x1b[4;9H");
+    hostSm.ProcessString(L"\x1b[?25h");
+
+    Log::Comment(L"Checking the host buffer state");
+    verifyBuffer(hostTb);
+
+    expectedOutput.push_back("\x1b[75C");
+    expectedOutput.push_back("XXXXX");
+    expectedOutput.push_back("\x1b[4;9H");
+    // We're _not_ expecting a cursor on here, because we didn't actually hide
+    // the cursor during the course of this frame
+
+    Log::Comment(L"Painting the frame");
+    VERIFY_SUCCEEDED(renderer.PaintFrame());
+
+    Log::Comment(L"Checking the terminal buffer state");
+    verifyBuffer(termTb);
 }
